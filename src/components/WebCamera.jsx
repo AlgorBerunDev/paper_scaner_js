@@ -12,140 +12,245 @@ const WebCamera = () => {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
 
-    // Convert to grayscale and detect edges
+    // Enhanced grayscale conversion with contrast boost
     const grayscale = new Uint8Array(width * height);
+    let min = 255,
+      max = 0;
+
     for (let i = 0; i < data.length; i += 4) {
-      grayscale[i / 4] = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      const value = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      grayscale[i / 4] = value;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
     }
 
-    // Simple edge detection
-    const edges = new Uint8Array(width * height);
-    const threshold = 30;
+    // Contrast enhancement
+    const range = max - min;
+    for (let i = 0; i < grayscale.length; i++) {
+      grayscale[i] = ((grayscale[i] - min) / range) * 255;
+    }
 
+    // Advanced edge detection with noise reduction
+    const edges = new Uint8Array(width * height);
+    const blurred = new Uint8Array(width * height);
+
+    // Gaussian blur for noise reduction
+    const gaussKernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        let sum = 0;
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const idx = (y + ky) * width + (x + kx);
+            sum += grayscale[idx] * gaussKernel[(ky + 1) * 3 + (kx + 1)];
+          }
+        }
+        blurred[y * width + x] = sum / 16;
+      }
+    }
+
+    // Adaptive threshold for edge detection
+    const calculateThreshold = (x, y) => {
+      let sum = 0,
+        count = 0;
+      const windowSize = 5;
+      for (let ky = -windowSize; ky <= windowSize; ky++) {
+        for (let kx = -windowSize; kx <= windowSize; kx++) {
+          const ny = y + ky;
+          const nx = x + kx;
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+            sum += blurred[ny * width + nx];
+            count++;
+          }
+        }
+      }
+      return (sum / count) * 0.8; // 80% of local average
+    };
+
+    // Enhanced Sobel operator with adaptive thresholding
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const idx = y * width + x;
 
-        // Sobel operator
+        // Sobel kernels
         const gx =
-          grayscale[idx - width - 1] +
-          2 * grayscale[idx - 1] +
-          grayscale[idx + width - 1] -
-          grayscale[idx - width + 1] -
-          2 * grayscale[idx + 1] -
-          grayscale[idx + width + 1];
+          -blurred[idx - width - 1] +
+          -2 * blurred[idx - 1] +
+          -blurred[idx + width - 1] +
+          blurred[idx - width + 1] +
+          2 * blurred[idx + 1] +
+          blurred[idx + width + 1];
 
         const gy =
-          grayscale[idx - width - 1] +
-          2 * grayscale[idx - width] +
-          grayscale[idx - width + 1] -
-          grayscale[idx + width - 1] -
-          2 * grayscale[idx + width] -
-          grayscale[idx + width + 1];
+          -blurred[idx - width - 1] +
+          -2 * blurred[idx - width] +
+          -blurred[idx - width + 1] +
+          blurred[idx + width - 1] +
+          2 * blurred[idx + width] +
+          blurred[idx + width + 1];
 
         const g = Math.sqrt(gx * gx + gy * gy);
+        const threshold = calculateThreshold(x, y);
         edges[idx] = g > threshold ? 255 : 0;
       }
     }
 
-    // Find long straight lines (potential paper edges)
-    const lines = [];
-    const minLineLength = width * 0.3; // At least 30% of image width
+    // Line detection with A4 aspect ratio consideration
+    const lines = {
+      horizontal: [],
+      vertical: [],
+    };
+
+    // A4 proportions (1:√2)
+    const A4_RATIO = 1.4142;
+    const RATIO_TOLERANCE = 0.2;
+
+    // Find strong lines
+    const minLineLength = Math.min(width, height) * 0.2; // At least 20% of smaller dimension
 
     // Horizontal lines
     for (let y = 0; y < height; y++) {
       let lineStart = -1;
-      let lineLength = 0;
+      let lineStrength = 0;
+      let edgePoints = [];
 
       for (let x = 0; x < width; x++) {
         const idx = y * width + x;
         if (edges[idx] > 0) {
           if (lineStart === -1) lineStart = x;
-          lineLength++;
+          lineStrength++;
+          edgePoints.push(x);
         } else if (lineStart !== -1) {
-          if (lineLength >= minLineLength) {
-            lines.push({
-              start: { x: lineStart, y },
-              end: { x: lineStart + lineLength, y },
-              length: lineLength,
-              isHorizontal: true,
-            });
+          if (lineStrength >= minLineLength) {
+            // Calculate line quality (continuity)
+            const gaps = edgePoints.slice(1).map((x, i) => x - edgePoints[i] - 1);
+            const maxGap = Math.max(...gaps, 0);
+            if (maxGap < 20) {
+              // Allow small gaps
+              lines.horizontal.push({
+                y,
+                x1: lineStart,
+                x2: lineStart + lineStrength,
+                strength: lineStrength,
+                quality: 1 - maxGap / lineStrength,
+              });
+            }
           }
           lineStart = -1;
-          lineLength = 0;
+          lineStrength = 0;
+          edgePoints = [];
         }
       }
     }
 
-    // Vertical lines
+    // Vertical lines (similar to horizontal)
     for (let x = 0; x < width; x++) {
       let lineStart = -1;
-      let lineLength = 0;
+      let lineStrength = 0;
+      let edgePoints = [];
 
       for (let y = 0; y < height; y++) {
         const idx = y * width + x;
         if (edges[idx] > 0) {
           if (lineStart === -1) lineStart = y;
-          lineLength++;
+          lineStrength++;
+          edgePoints.push(y);
         } else if (lineStart !== -1) {
-          if (lineLength >= minLineLength) {
-            lines.push({
-              start: { x, y: lineStart },
-              end: { x, y: lineStart + lineLength },
-              length: lineLength,
-              isHorizontal: false,
-            });
+          if (lineStrength >= minLineLength) {
+            const gaps = edgePoints.slice(1).map((y, i) => y - edgePoints[i] - 1);
+            const maxGap = Math.max(...gaps, 0);
+            if (maxGap < 20) {
+              lines.vertical.push({
+                x,
+                y1: lineStart,
+                y2: lineStart + lineStrength,
+                strength: lineStrength,
+                quality: 1 - maxGap / lineStrength,
+              });
+            }
           }
           lineStart = -1;
-          lineLength = 0;
+          lineStrength = 0;
+          edgePoints = [];
         }
       }
     }
 
-    // Draw detected lines
-    ctx.strokeStyle = "#00FF00";
-    ctx.lineWidth = 3;
-    lines.forEach(line => {
+    // Sort lines by quality and strength
+    lines.horizontal.sort((a, b) => b.quality * b.strength - a.quality * a.strength);
+    lines.vertical.sort((a, b) => b.quality * b.strength - a.quality * a.strength);
+
+    // Take best candidates
+    lines.horizontal = lines.horizontal.slice(0, 10);
+    lines.vertical = lines.vertical.slice(0, 10);
+
+    // Find paper corners by checking line intersections and A4 proportions
+    const findCorners = () => {
+      let bestCorners = null;
+      let bestScore = 0;
+
+      for (const h1 of lines.horizontal) {
+        for (const h2 of lines.horizontal) {
+          if (h1 === h2) continue;
+
+          const height = Math.abs(h1.y - h2.y);
+          if (height < minLineLength) continue;
+
+          for (const v1 of lines.vertical) {
+            for (const v2 of lines.vertical) {
+              if (v1 === v2) continue;
+
+              const width = Math.abs(v1.x - v2.x);
+              if (width < minLineLength) continue;
+
+              const ratio = height / width;
+              if (Math.abs(ratio - A4_RATIO) > RATIO_TOLERANCE) continue;
+
+              const corners = [
+                { x: v1.x, y: h1.y },
+                { x: v2.x, y: h1.y },
+                { x: v1.x, y: h2.y },
+                { x: v2.x, y: h2.y },
+              ];
+
+              const score =
+                (h1.quality + h2.quality + v1.quality + v2.quality) *
+                (1 - Math.abs(ratio - A4_RATIO) / RATIO_TOLERANCE);
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestCorners = corners;
+              }
+            }
+          }
+        }
+      }
+
+      return bestCorners;
+    };
+
+    const corners = findCorners();
+
+    // Draw detected paper
+    if (corners) {
+      ctx.strokeStyle = "#00FF00";
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(line.start.x, line.start.y);
-      ctx.lineTo(line.end.x, line.end.y);
+      ctx.moveTo(corners[0].x, corners[0].y);
+      ctx.lineTo(corners[1].x, corners[1].y);
+      ctx.lineTo(corners[3].x, corners[3].y);
+      ctx.lineTo(corners[2].x, corners[2].y);
+      ctx.closePath();
       ctx.stroke();
-    });
 
-    // Try to find paper corners from line intersections
-    const corners = [];
-    for (let i = 0; i < lines.length; i++) {
-      for (let j = i + 1; j < lines.length; j++) {
-        const line1 = lines[i];
-        const line2 = lines[j];
-
-        // Only check intersections between horizontal and vertical lines
-        if (line1.isHorizontal === line2.isHorizontal) continue;
-
-        const horLine = line1.isHorizontal ? line1 : line2;
-        const vertLine = line1.isHorizontal ? line2 : line1;
-
-        if (
-          vertLine.start.x >= horLine.start.x &&
-          vertLine.start.x <= horLine.end.x &&
-          horLine.start.y >= vertLine.start.y &&
-          horLine.start.y <= vertLine.end.y
-        ) {
-          corners.push({
-            x: vertLine.start.x,
-            y: horLine.start.y,
-          });
-        }
-      }
+      // Draw corners
+      ctx.fillStyle = "#FF0000";
+      corners.forEach(corner => {
+        ctx.beginPath();
+        ctx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      });
     }
-
-    // Draw corners
-    ctx.fillStyle = "#FF0000";
-    corners.forEach(corner => {
-      ctx.beginPath();
-      ctx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
-      ctx.fill();
-    });
   };
 
   const drawToCanvas = () => {
@@ -157,10 +262,7 @@ const WebCamera = () => {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    // Draw original frame
     context.drawImage(video, 0, 0);
-
-    // Find and highlight paper
     findPaper(context, canvas.width, canvas.height);
 
     requestId.current = requestAnimationFrame(drawToCanvas);
@@ -170,9 +272,9 @@ const WebCamera = () => {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: "environment", // Use back camera if available
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          facingMode: "environment",
         },
       });
 
@@ -212,7 +314,7 @@ const WebCamera = () => {
   return (
     <div className="flex flex-col items-center gap-4">
       <video ref={videoRef} className="hidden" playsInline />
-      <canvas ref={canvasRef} className="w-full max-w-2xl border border-gray-300 rounded-lg" />
+      <canvas ref={canvasRef} className="w-full max-w-4xl border border-gray-300 rounded-lg" />
       <button
         onClick={isStarted ? stopCamera : startCamera}
         className={`px-4 py-2 rounded-lg flex items-center gap-2 text-white ${
