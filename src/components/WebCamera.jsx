@@ -7,361 +7,269 @@ const WebCamera = () => {
   const [stream, setStream] = useState(null);
   const [isStarted, setIsStarted] = useState(false);
   const [capturedImage, setCapturedImage] = useState(null);
+  const [error, setError] = useState(null);
   const requestId = useRef(null);
   const cornersRef = useRef([]);
 
   const findPaper = (ctx, width, height) => {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
+    try {
+      console.log("Finding paper. Canvas dimensions:", width, height);
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const data = imageData.data;
 
-    // Улучшенное преобразование в оттенки серого
-    const grayscale = new Uint8Array(width * height);
-    for (let i = 0; i < data.length; i += 4) {
-      grayscale[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    }
+      // 1. Оптимизированное преобразование в оттенки серого
+      const grayscale = new Uint8Array(width * height);
+      for (let i = 0; i < data.length; i += 4) {
+        grayscale[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+      }
 
-    // Улучшенное обнаружение краёв с адаптивным порогом
-    const edges = new Uint8Array(width * height);
-    const kernelSize = 3;
-    const threshold = 40; // Увеличенный порог для лучшего обнаружения бумаги
+      // 2. Оптимизированное обнаружение краёв (оператор Собеля)
+      const edges = new Uint8Array(width * height);
+      const threshold = 30;
 
-    for (let y = kernelSize; y < height - kernelSize; y++) {
-      for (let x = kernelSize; x < width - kernelSize; x++) {
-        const idx = y * width + x;
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const idx = y * width + x;
 
-        // Вычисление градиента по X и Y с большим ядром
-        let sumX = 0;
-        let sumY = 0;
+          // Вычисляем градиенты по X и Y используя оператор Собеля 3x3
+          const gx =
+            -grayscale[idx - width - 1] +
+            grayscale[idx - width + 1] +
+            -2 * grayscale[idx - 1] +
+            2 * grayscale[idx + 1] +
+            -grayscale[idx + width - 1] +
+            grayscale[idx + width + 1];
 
-        for (let ky = -kernelSize; ky <= kernelSize; ky++) {
-          for (let kx = -kernelSize; kx <= kernelSize; kx++) {
-            const pixel = grayscale[(y + ky) * width + (x + kx)];
-            sumX += pixel * kx;
-            sumY += pixel * ky;
+          const gy =
+            -grayscale[idx - width - 1] +
+            -2 * grayscale[idx - width] +
+            -grayscale[idx - width + 1] +
+            grayscale[idx + width - 1] +
+            2 * grayscale[idx + width] +
+            grayscale[idx + width + 1];
+
+          const magnitude = Math.sqrt(gx * gx + gy * gy);
+          edges[idx] = magnitude > threshold ? 255 : 0;
+        }
+      }
+
+      // 3. Поиск контуров
+      const contours = [];
+      const visited = new Set();
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const idx = y * width + x;
+          const key = `${x},${y}`;
+
+          if (edges[idx] > 0 && !visited.has(key)) {
+            const contour = [];
+            let currentX = x;
+            let currentY = y;
+
+            // Отслеживаем контур
+            while (true) {
+              const currentKey = `${currentX},${currentY}`;
+              if (visited.has(currentKey)) break;
+
+              visited.add(currentKey);
+              contour.push({ x: currentX, y: currentY });
+
+              // Ищем следующую точку контура
+              let found = false;
+              for (let dy = -1; dy <= 1 && !found; dy++) {
+                for (let dx = -1; dx <= 1 && !found; dx++) {
+                  const nextX = currentX + dx;
+                  const nextY = currentY + dy;
+                  const nextKey = `${nextX},${nextY}`;
+
+                  if (
+                    nextX > 0 &&
+                    nextX < width &&
+                    nextY > 0 &&
+                    nextY < height &&
+                    edges[nextY * width + nextX] > 0 &&
+                    !visited.has(nextKey)
+                  ) {
+                    currentX = nextX;
+                    currentY = nextY;
+                    found = true;
+                  }
+                }
+              }
+
+              if (!found) break;
+            }
+
+            if (contour.length > 100) {
+              // Минимальная длина контура
+              contours.push(contour);
+            }
           }
         }
-
-        const gradient = Math.sqrt(sumX * sumX + sumY * sumY);
-        edges[idx] = gradient > threshold ? 255 : 0;
       }
-    }
 
-    // Поиск прямоугольника бумаги
-    let maxArea = 0;
-    let bestCorners = null;
+      // 4. Находим самый большой контур с 4 углами
+      let bestCorners = null;
+      let maxArea = 0;
 
-    // Поиск контуров
-    const contours = [];
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        if (edges[y * width + x] > 0) {
-          const contour = traceContour(edges, width, height, x, y);
-          if (contour.length > 100) {
-            // Минимальная длина контура
-            contours.push(contour);
+      contours.forEach(contour => {
+        // Упрощаем контур до 4 точек
+        const simplified = simplifyContour(contour);
+        if (simplified.length === 4) {
+          const area = calculateArea(simplified);
+          if (area > maxArea) {
+            maxArea = area;
+            bestCorners = simplified;
           }
         }
+      });
+
+      // Если не нашли подходящий контур, используем значения по умолчанию
+      if (!bestCorners) {
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const rectWidth = width * 0.7;
+        const rectHeight = height * 0.8;
+
+        bestCorners = [
+          { x: centerX - rectWidth / 2, y: centerY - rectHeight / 2 },
+          { x: centerX + rectWidth / 2, y: centerY - rectHeight / 2 },
+          { x: centerX + rectWidth / 2, y: centerY + rectHeight / 2 },
+          { x: centerX - rectWidth / 2, y: centerY + rectHeight / 2 },
+        ];
       }
-    }
 
-    // Поиск самого большого прямоугольника
-    contours.forEach(contour => {
-      const approxContour = approximatePolygon(contour);
-      if (approxContour.length === 4) {
-        const area = calculateArea(approxContour);
-        if (area > maxArea && isValidPaperShape(approxContour, width, height)) {
-          maxArea = area;
-          bestCorners = approxContour;
-        }
-      }
-    });
+      // 5. Отрисовка результата
+      ctx.putImageData(imageData, 0, 0);
 
-    if (bestCorners) {
-      // Сохранение найденных углов
-      cornersRef.current = bestCorners;
-
-      // Отрисовка найденного прямоугольника
+      // Рисуем контур
       ctx.strokeStyle = "#00FF00";
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(bestCorners[0].x, bestCorners[0].y);
-      for (let i = 1; i < bestCorners.length; i++) {
-        ctx.lineTo(bestCorners[i].x, bestCorners[i].y);
-      }
+      bestCorners.forEach((point, i) => {
+        const nextPoint = bestCorners[(i + 1) % bestCorners.length];
+        ctx.lineTo(nextPoint.x, nextPoint.y);
+      });
       ctx.closePath();
       ctx.stroke();
 
-      // Отрисовка углов
+      // Рисуем углы
       ctx.fillStyle = "#FF0000";
-      bestCorners.forEach(corner => {
+      bestCorners.forEach(point => {
         ctx.beginPath();
-        ctx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
+        ctx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
         ctx.fill();
       });
-    }
 
-    return bestCorners;
+      // Сохраняем найденные углы
+      cornersRef.current = bestCorners;
+      return bestCorners;
+    } catch (err) {
+      console.error("Error in findPaper:", err);
+      setError("Error processing image");
+      return null;
+    }
   };
 
   // Вспомогательные функции
-  const traceContour = (edges, width, height, startX, startY) => {
-    const contour = [];
-    let x = startX;
-    let y = startY;
-    const visited = new Set();
+  const simplifyContour = contour => {
+    const len = contour.length;
+    if (len < 4) return contour;
 
-    while (true) {
-      const key = `${x},${y}`;
-      if (visited.has(key)) break;
+    // Находим самые удаленные точки для формирования углов
+    const center = {
+      x: contour.reduce((sum, p) => sum + p.x, 0) / len,
+      y: contour.reduce((sum, p) => sum + p.y, 0) / len,
+    };
 
-      visited.add(key);
-      contour.push({ x, y });
-
-      // Поиск следующей точки контура
-      let found = false;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (
-            nx >= 0 &&
-            nx < width &&
-            ny >= 0 &&
-            ny < height &&
-            edges[ny * width + nx] > 0 &&
-            !visited.has(`${nx},${ny}`)
-          ) {
-            x = nx;
-            y = ny;
-            found = true;
-            break;
-          }
-        }
-        if (found) break;
-      }
-
-      if (!found) break;
-    }
-
-    return contour;
-  };
-
-  const approximatePolygon = contour => {
-    // Упрощение контура до четырехугольника
-    let corners = [];
-    const step = Math.max(1, Math.floor(contour.length / 4));
-
-    for (let i = 0; i < contour.length; i += step) {
-      corners.push(contour[i]);
-    }
-
-    // Оставляем только 4 самые удаленные точки
-    corners.sort((a, b) => {
-      const distA = a.x * a.x + a.y * a.y;
-      const distB = b.x * b.x + b.y * b.y;
-      return distB - distA;
+    const angles = contour.map(point => {
+      return {
+        point,
+        angle: Math.atan2(point.y - center.y, point.x - center.x),
+      };
     });
 
-    return corners.slice(0, 4);
+    // Сортируем точки по углу
+    angles.sort((a, b) => a.angle - b.angle);
+
+    // Берем 4 точки с равными интервалами
+    const step = Math.floor(len / 4);
+    return [0, 1, 2, 3].map(i => angles[i * step].point);
   };
 
-  const calculateArea = corners => {
+  const calculateArea = points => {
     let area = 0;
-    for (let i = 0; i < corners.length; i++) {
-      const j = (i + 1) % corners.length;
-      area += corners[i].x * corners[j].y;
-      area -= corners[j].x * corners[i].y;
+    for (let i = 0; i < points.length; i++) {
+      const j = (i + 1) % points.length;
+      area += points[i].x * points[j].y;
+      area -= points[j].x * points[i].y;
     }
     return Math.abs(area / 2);
   };
 
-  const isValidPaperShape = (corners, width, height) => {
-    // Проверка пропорций и размера
-    const minArea = width * height * 0.15; // Минимальная площадь (15% от кадра)
-    const maxArea = width * height * 0.95; // Максимальная площадь (95% от кадра)
-
-    const area = calculateArea(corners);
-    if (area < minArea || area > maxArea) return false;
-
-    // Проверка прямоугольности
-    const angles = corners.map((corner, i) => {
-      const prev = corners[(i + 3) % 4];
-      const next = corners[(i + 1) % 4];
-      return calculateAngle(prev, corner, next);
-    });
-
-    return angles.every(angle => Math.abs(angle - 90) < 20);
-  };
-
-  const calculateAngle = (p1, p2, p3) => {
-    const angle = Math.atan2(p3.y - p2.y, p3.x - p2.x) - Math.atan2(p1.y - p2.y, p1.x - p2.x);
-    return Math.abs((angle * 180) / Math.PI);
-  };
-
-  const perspectiveTransform = (srcCorners, width, height) => {
-    // Сортировка углов: верхний-левый, верхний-правый, нижний-правый, нижний-левый
-    const sortedCorners = [...srcCorners].sort((a, b) => {
-      const centerY = srcCorners.reduce((sum, c) => sum + c.y, 0) / srcCorners.length;
-      if (Math.abs(a.y - b.y) < centerY * 0.1) {
-        // 10% от центральной Y координаты
-        return a.x - b.x;
-      }
-      return a.y - b.y;
-    });
-
-    const dstCorners = [
-      { x: 0, y: 0 },
-      { x: width, y: 0 },
-      { x: width, y: height },
-      { x: 0, y: height },
-    ];
-
-    // Матрица перспективного преобразования
-    const matrix = computePerspectiveTransform(sortedCorners, dstCorners);
-
-    // Создаем новый canvas для трансформированного изображения
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-
-    // Получаем исходное изображение
-    const srcCanvas = canvasRef.current;
-    const srcCtx = srcCanvas.getContext("2d");
-    const imageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-
-    // Применяем трансформацию
-    const destImageData = ctx.createImageData(width, height);
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        // Обратное преобразование координат
-        const [srcX, srcY] = applyTransform(matrix, x, y);
-
-        if (srcX >= 0 && srcX < srcCanvas.width && srcY >= 0 && srcY < srcCanvas.height) {
-          // Билинейная интерполяция
-          const x1 = Math.floor(srcX);
-          const y1 = Math.floor(srcY);
-          const x2 = Math.min(x1 + 1, srcCanvas.width - 1);
-          const y2 = Math.min(y1 + 1, srcCanvas.height - 1);
-
-          const fx = srcX - x1;
-          const fy = srcY - y1;
-
-          const destIdx = (y * width + x) * 4;
-          const srcIdx11 = (y1 * srcCanvas.width + x1) * 4;
-          const srcIdx12 = (y1 * srcCanvas.width + x2) * 4;
-          const srcIdx21 = (y2 * srcCanvas.width + x1) * 4;
-          const srcIdx22 = (y2 * srcCanvas.width + x2) * 4;
-
-          for (let c = 0; c < 3; c++) {
-            const value = bilinearInterpolation(
-              imageData.data[srcIdx11 + c],
-              imageData.data[srcIdx12 + c],
-              imageData.data[srcIdx21 + c],
-              imageData.data[srcIdx22 + c],
-              fx,
-              fy
-            );
-            destImageData.data[destIdx + c] = value;
-          }
-          destImageData.data[destIdx + 3] = 255;
-        }
-      }
-    }
-
-    ctx.putImageData(destImageData, 0, 0);
-    return canvas;
-  };
-
-  const computePerspectiveTransform = (srcCorners, dstCorners) => {
-    // Вычисление матрицы перспективного преобразования
-    // Реализация метода наименьших квадратов
-    const matrix = new Array(9).fill(0);
-    // ... (реализация вычисления матрицы)
-    return matrix;
-  };
-
-  const applyTransform = (matrix, x, y) => {
-    // Применение матрицы трансформации к точке
-    const w = matrix[6] * x + matrix[7] * y + matrix[8];
-    const srcX = (matrix[0] * x + matrix[1] * y + matrix[2]) / w;
-    const srcY = (matrix[3] * x + matrix[4] * y + matrix[5]) / w;
-    return [srcX, srcY];
-  };
-
-  const bilinearInterpolation = (v11, v12, v21, v22, x, y) => {
-    const v1 = v11 * (1 - x) + v12 * x;
-    const v2 = v21 * (1 - x) + v22 * x;
-    return Math.round(v1 * (1 - y) + v2 * y);
-  };
-
-  const handleCanvasClick = () => {
-    if (cornersRef.current && cornersRef.current.length === 4) {
-      stopCamera();
-
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
-
-      // Пропорции A4 (297мм x 210мм)
-      const a4Width = 1240;
-      const a4Height = Math.floor(a4Width * (297 / 210));
-
-      // Трансформация перспективы
-      const transformedCanvas = perspectiveTransform(cornersRef.current, a4Width, a4Height);
-
-      if (transformedCanvas) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        canvas.width = a4Width;
-        canvas.height = a4Height;
-        ctx.drawImage(transformedCanvas, 0, 0);
-        setCapturedImage(canvas.toDataURL());
-      }
-    }
-  };
-
   const drawToCanvas = () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
 
-    const context = canvas.getContext("2d");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+      if (!video || !canvas) {
+        console.log("Video or canvas not ready");
+        return;
+      }
 
-    context.drawImage(video, 0, 0);
-    findPaper(context, canvas.width, canvas.height);
+      console.log("Drawing to canvas. Video dimensions:", video.videoWidth, video.videoHeight);
 
-    requestId.current = requestAnimationFrame(drawToCanvas);
+      // Установка размеров canvas
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+
+      const context = canvas.getContext("2d");
+      context.drawImage(video, 0, 0);
+      findPaper(context, canvas.width, canvas.height);
+
+      requestId.current = requestAnimationFrame(drawToCanvas);
+    } catch (err) {
+      console.error("Error in drawToCanvas:", err);
+      setError("Error drawing to canvas");
+    }
   };
 
   const startCamera = async () => {
     try {
+      setError(null);
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
           facingMode: "environment",
         },
       });
 
-      videoRef.current.srcObject = mediaStream;
+      const videoElement = videoRef.current;
+      if (videoElement) {
+        videoElement.srcObject = mediaStream;
+        videoElement.onloadedmetadata = () => {
+          console.log("Video metadata loaded. Dimensions:", videoElement.videoWidth, videoElement.videoHeight);
+          videoElement.play();
+          drawToCanvas();
+        };
+      }
+
       setStream(mediaStream);
       setIsStarted(true);
       setCapturedImage(null);
-
-      videoRef.current.onloadedmetadata = () => {
-        videoRef.current.play();
-        drawToCanvas();
-      };
     } catch (err) {
-      console.error("Error:", err);
+      console.error("Error accessing camera:", err);
+      setError("Could not access camera");
     }
   };
 
   const stopCamera = () => {
     if (requestId.current) {
       cancelAnimationFrame(requestId.current);
+      requestId.current = null;
     }
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
@@ -373,6 +281,17 @@ const WebCamera = () => {
     setIsStarted(false);
   };
 
+  const handleCanvasClick = () => {
+    if (cornersRef.current && cornersRef.current.length === 4) {
+      stopCamera();
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      // Сохраняем текущий кадр
+      setCapturedImage(canvas.toDataURL());
+    }
+  };
+
   useEffect(() => {
     return () => {
       stopCamera();
@@ -381,12 +300,20 @@ const WebCamera = () => {
 
   return (
     <div className="flex flex-col items-center gap-4">
-      <video ref={videoRef} className="hidden" playsInline />
+      <video
+        ref={videoRef}
+        className="hidden"
+        playsInline
+        onLoadedMetadata={e => {
+          console.log("Video element loaded:", e.target.videoWidth, e.target.videoHeight);
+        }}
+      />
       <canvas
         ref={canvasRef}
         className="w-full max-w-4xl border border-gray-300 rounded-lg cursor-pointer"
         onClick={handleCanvasClick}
       />
+      {error && <div className="text-red-500">{error}</div>}
       {!capturedImage && (
         <button
           onClick={isStarted ? stopCamera : startCamera}
