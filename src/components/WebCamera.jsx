@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Camera, CameraOff } from "lucide-react";
 
+// ------ ВАЖНО: используйте библиотеку opencv.js (WebAssembly) ------
+// Раскомментируйте или добавьте <script src="https://docs.opencv.org/4.6.0/opencv.js"></script>
+// в ваш index.html. Или импортируйте opencv через npm-пакет (experimental).
+
+// window.cv будет доступен глобально, когда OpenCV подгрузится.
+
+const TARGET_ASPECT_RATIO = 297 / 210; // A4 (примерно 1.4142)
+
 const WebCamera = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -9,236 +17,176 @@ const WebCamera = () => {
   const [capturedImage, setCapturedImage] = useState(null);
   const [error, setError] = useState(null);
   const requestId = useRef(null);
-  const cornersRef = useRef([]);
 
-  const findPaper = (ctx, width, height) => {
+  const [status, setStatus] = useState("Ищем бумагу...");
+
+  // Функция, которая ищет контур A4 на canvas
+  const findA4Paper = (ctx, width, height) => {
     try {
-      // console.log("Finding paper. Canvas dimensions:", width, height);
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const data = imageData.data;
+      const src = new window.cv.Mat(height, width, window.cv.CV_8UC4);
+      const dst = new window.cv.Mat(height, width, window.cv.CV_8UC1);
+      const hierarchy = new window.cv.Mat();
 
-      // 1. Оптимизированное преобразование в оттенки серого
-      const grayscale = new Uint8Array(width * height);
-      for (let i = 0; i < data.length; i += 4) {
-        grayscale[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-      }
+      // Считываем данные из canvas в матрицу src
+      let imageData = ctx.getImageData(0, 0, width, height);
+      src.data.set(imageData.data);
 
-      // 2. Оптимизированное обнаружение краёв (оператор Собеля)
-      const edges = new Uint8Array(width * height);
-      const threshold = 30;
+      // Преобразуем в оттенки серого
+      window.cv.cvtColor(src, dst, window.cv.COLOR_RGBA2GRAY);
 
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          const idx = y * width + x;
+      // Размываем, чтобы убрать мелкие шумы
+      window.cv.GaussianBlur(dst, dst, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
 
-          // Вычисляем градиенты по X и Y используя оператор Собеля 3x3
-          const gx =
-            -grayscale[idx - width - 1] +
-            grayscale[idx - width + 1] +
-            -2 * grayscale[idx - 1] +
-            2 * grayscale[idx + 1] +
-            -grayscale[idx + width - 1] +
-            grayscale[idx + width + 1];
+      // Поиск резких границ (Canny)
+      window.cv.Canny(dst, dst, 50, 150);
 
-          const gy =
-            -grayscale[idx - width - 1] +
-            -2 * grayscale[idx - width] +
-            -grayscale[idx - width + 1] +
-            grayscale[idx + width - 1] +
-            2 * grayscale[idx + width] +
-            grayscale[idx + width + 1];
+      // Увеличим области (dilate) и затем чуть «съедим» (erode),
+      // чтобы контуры «замкнулись» лучше
+      const M = window.cv.Mat.ones(3, 3, window.cv.CV_8U);
+      window.cv.dilate(dst, dst, M);
+      window.cv.erode(dst, dst, M);
 
-          const magnitude = Math.sqrt(gx * gx + gy * gy);
-          edges[idx] = magnitude > threshold ? 255 : 0;
-        }
-      }
+      // Ищем контуры
+      const contours = new window.cv.MatVector();
+      window.cv.findContours(dst, contours, hierarchy, window.cv.RETR_EXTERNAL, window.cv.CHAIN_APPROX_SIMPLE);
 
-      // 3. Поиск контуров
-      const contours = [];
-      const visited = new Set();
+      let biggestRect = null;
+      let bestArea = 0;
 
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          const idx = y * width + x;
-          const key = `${x},${y}`;
+      for (let i = 0; i < contours.size(); i++) {
+        const contour = contours.get(i);
+        // Аппроксимируем контур к многоугольнику
+        const approx = new window.cv.Mat();
+        const perimeter = window.cv.arcLength(contour, true);
+        window.cv.approxPolyDP(contour, approx, 0.02 * perimeter, true);
 
-          if (edges[idx] > 0 && !visited.has(key)) {
-            const contour = [];
-            let currentX = x;
-            let currentY = y;
-
-            // Отслеживаем контур
-            while (true) {
-              const currentKey = `${currentX},${currentY}`;
-              if (visited.has(currentKey)) break;
-
-              visited.add(currentKey);
-              contour.push({ x: currentX, y: currentY });
-
-              // Ищем следующую точку контура
-              let found = false;
-              for (let dy = -1; dy <= 1 && !found; dy++) {
-                for (let dx = -1; dx <= 1 && !found; dx++) {
-                  const nextX = currentX + dx;
-                  const nextY = currentY + dy;
-                  const nextKey = `${nextX},${nextY}`;
-
-                  if (
-                    nextX > 0 &&
-                    nextX < width &&
-                    nextY > 0 &&
-                    nextY < height &&
-                    edges[nextY * width + nextX] > 0 &&
-                    !visited.has(nextKey)
-                  ) {
-                    currentX = nextX;
-                    currentY = nextY;
-                    found = true;
-                  }
-                }
-              }
-
-              if (!found) break;
-            }
-
-            if (contour.length > 100) {
-              // Минимальная длина контура
-              contours.push(contour);
-            }
+        // Ищем четырёхугольник (4 вершины)
+        if (approx.rows === 4) {
+          // Вычисляем площадь
+          const contourArea = window.cv.contourArea(approx);
+          if (contourArea > bestArea) {
+            bestArea = contourArea;
+            biggestRect = approx;
+          } else {
+            approx.delete();
           }
+        } else {
+          approx.delete();
         }
+        contour.delete();
       }
 
-      // 4. Находим самый большой контур с 4 углами
-      let bestCorners = null;
-      let maxArea = 0;
-
-      contours.forEach(contour => {
-        // Упрощаем контур до 4 точек
-        const simplified = simplifyContour(contour);
-        if (simplified.length === 4) {
-          const area = calculateArea(simplified);
-          if (area > maxArea) {
-            maxArea = area;
-            bestCorners = simplified;
-          }
+      // Если нашли четырёхугольник
+      if (biggestRect) {
+        // Преобразуем точки в удобный формат
+        const corners = [];
+        for (let i = 0; i < 4; i++) {
+          const x = biggestRect.intAt(i, 0);
+          const y = biggestRect.intAt(i, 1);
+          corners.push({ x, y });
         }
-      });
 
-      // Если не нашли подходящий контур, используем значения по умолчанию
-      if (!bestCorners) {
-        const centerX = width / 2;
-        const centerY = height / 2;
-        const rectWidth = width * 0.7;
-        const rectHeight = height * 0.8;
+        // Сортируем углы в порядке: top-left, top-right, bottom-right, bottom-left
+        // (Это упрощённый метод; в OpenCV обычно делают minAreaRect, затем сортируют)
+        corners.sort((a, b) => a.x + a.y - (b.x + b.y));
+        // corners[0] будет самым "верхним левым", corners[3] - "нижним правым" условно.
+        // Для большей точности можно написать свою логику сортировки.
 
-        bestCorners = [
-          { x: centerX - rectWidth / 2, y: centerY - rectHeight / 2 },
-          { x: centerX + rectWidth / 2, y: centerY - rectHeight / 2 },
-          { x: centerX + rectWidth / 2, y: centerY + rectHeight / 2 },
-          { x: centerX - rectWidth / 2, y: centerY + rectHeight / 2 },
-        ];
+        // Проверим аспект-ратио
+        // Считаем расстояния между соседними углами
+        const d1 = distance(corners[0], corners[1]); // top side
+        const d2 = distance(corners[1], corners[2]); // right side
+        const d3 = distance(corners[2], corners[3]); // bottom side
+        const d4 = distance(corners[3], corners[0]); // left side
+
+        // Предположим, что "верхняя" и "нижняя" стороны — это d1 и d3
+        // "правая" и "левая" — это d2 и d4
+        // Берём среднее по "горизонтальным" сторонам и среднее по "вертикальным"
+        const avgH = (d1 + d3) / 2;
+        const avgV = (d2 + d4) / 2;
+        const ratio = avgV > 0 ? avgH / avgV : 0;
+
+        // Сравниваем с соотношением A4 (297/210 ~ 1.4142).
+        // Допустим, что углы камеры могут вносить погрешность, пусть 10% допустим
+        const lowerBound = TARGET_ASPECT_RATIO * 0.9;
+        const upperBound = TARGET_ASPECT_RATIO * 1.1;
+
+        if (ratio > lowerBound && ratio < upperBound) {
+          // Рисуем контур на canvas
+          drawPolygon(ctx, corners, "#00FF00");
+
+          setStatus("Бумага A4 найдена!");
+        } else {
+          drawPolygon(ctx, corners, "#FFA500");
+          setStatus("Найден прямоугольник, но не A4.");
+        }
+
+        biggestRect.delete();
+      } else {
+        setStatus("Прямоугольник не найден.");
       }
 
-      // 5. Отрисовка результата
-      ctx.putImageData(imageData, 0, 0);
+      // Очищаем
+      src.delete();
+      dst.delete();
+      hierarchy.delete();
+      contours.delete();
+    } catch (e) {
+      console.error(e);
+      setError("Ошибка при распознавании");
+    }
+  };
 
-      // Рисуем контур
-      ctx.strokeStyle = "#00FF00";
-      ctx.lineWidth = 3;
+  const drawPolygon = (ctx, corners, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for (let i = 1; i < corners.length; i++) {
+      ctx.lineTo(corners[i].x, corners[i].y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // Рисуем углы точками
+    ctx.fillStyle = color;
+    corners.forEach(corner => {
       ctx.beginPath();
-      ctx.moveTo(bestCorners[0].x, bestCorners[0].y);
-      bestCorners.forEach((point, i) => {
-        const nextPoint = bestCorners[(i + 1) % bestCorners.length];
-        ctx.lineTo(nextPoint.x, nextPoint.y);
-      });
-      ctx.closePath();
-      ctx.stroke();
-
-      // Рисуем углы
-      ctx.fillStyle = "#FF0000";
-      bestCorners.forEach(point => {
-        ctx.beginPath();
-        ctx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
-        ctx.fill();
-      });
-
-      // Сохраняем найденные углы
-      cornersRef.current = bestCorners;
-      return bestCorners;
-    } catch (err) {
-      // console.error("Error in findPaper:", err);
-      setError("Error processing image");
-      return null;
-    }
-  };
-
-  // Вспомогательные функции
-  const simplifyContour = contour => {
-    const len = contour.length;
-    if (len < 4) return contour;
-
-    // Находим самые удаленные точки для формирования углов
-    const center = {
-      x: contour.reduce((sum, p) => sum + p.x, 0) / len,
-      y: contour.reduce((sum, p) => sum + p.y, 0) / len,
-    };
-
-    const angles = contour.map(point => {
-      return {
-        point,
-        angle: Math.atan2(point.y - center.y, point.x - center.x),
-      };
+      ctx.arc(corner.x, corner.y, 5, 0, 2 * Math.PI);
+      ctx.fill();
     });
-
-    // Сортируем точки по углу
-    angles.sort((a, b) => a.angle - b.angle);
-
-    // Берем 4 точки с равными интервалами
-    const step = Math.floor(len / 4);
-    return [0, 1, 2, 3].map(i => angles[i * step].point);
   };
 
-  const calculateArea = points => {
-    let area = 0;
-    for (let i = 0; i < points.length; i++) {
-      const j = (i + 1) % points.length;
-      area += points[i].x * points[j].y;
-      area -= points[j].x * points[i].y;
-    }
-    return Math.abs(area / 2);
+  const distance = (p1, p2) => {
+    const dx = p1.x - p2.x;
+    const dy = p1.y - p2.y;
+    return Math.sqrt(dx * dx + dy * dy);
   };
 
   const drawToCanvas = () => {
-    try {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
+    if (!videoRef.current || !canvasRef.current) return;
 
-      if (!video || !canvas) {
-        // console.log("Video or canvas not ready");
-        return;
-      }
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
 
-      // console.log("Drawing to canvas. Video dimensions:", video.videoWidth, video.videoHeight);
+    // Устанавливаем размеры canvas по факту видеокадра
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
 
-      // Установка размеров canvas
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
+    // Рисуем текущее изображение с видео
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      const context = canvas.getContext("2d");
-      context.drawImage(video, 0, 0);
-      findPaper(context, canvas.width, canvas.height);
+    // Пытаемся найти бумагу А4
+    findA4Paper(ctx, canvas.width, canvas.height);
 
-      requestId.current = requestAnimationFrame(drawToCanvas);
-    } catch (err) {
-      // console.error("Error in drawToCanvas:", err);
-      setError("Error drawing to canvas");
-    }
+    requestId.current = requestAnimationFrame(drawToCanvas);
   };
 
   const startCamera = async () => {
     try {
       setError(null);
+      setStatus("Подключаем камеру...");
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 1280 },
@@ -251,8 +199,8 @@ const WebCamera = () => {
       if (videoElement) {
         videoElement.srcObject = mediaStream;
         videoElement.onloadedmetadata = () => {
-          // console.log("Video metadata loaded. Dimensions:", videoElement.videoWidth, videoElement.videoHeight);
           videoElement.play();
+          // Запускаем цикл отрисовки
           drawToCanvas();
         };
       }
@@ -260,9 +208,11 @@ const WebCamera = () => {
       setStream(mediaStream);
       setIsStarted(true);
       setCapturedImage(null);
+      setStatus("Ищем бумагу...");
     } catch (err) {
-      // console.error("Error accessing camera:", err);
+      console.error("Error accessing camera:", err);
       setError("Could not access camera");
+      setStatus("Ошибка доступа к камере");
     }
   };
 
@@ -279,20 +229,20 @@ const WebCamera = () => {
     }
     setStream(null);
     setIsStarted(false);
+    setStatus("Камера остановлена");
   };
 
+  // Щелчок по canvas — делаем снимок (сохраняем dataURL)
   const handleCanvasClick = () => {
-    if (cornersRef.current && cornersRef.current.length === 4) {
-      stopCamera();
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-
-      // Сохраняем текущий кадр
-      setCapturedImage(canvas.toDataURL());
-    }
+    if (!canvasRef.current) return;
+    stopCamera();
+    const dataUrl = canvasRef.current.toDataURL("image/png");
+    setCapturedImage(dataUrl);
+    setStatus("Снимок сделан");
   };
 
   useEffect(() => {
+    // При размонтировании компонента — останавливаем камеру
     return () => {
       stopCamera();
     };
@@ -300,20 +250,17 @@ const WebCamera = () => {
 
   return (
     <div className="flex flex-col items-center gap-4">
-      <video
-        ref={videoRef}
-        className="hidden"
-        playsInline
-        onLoadedMetadata={e => {
-          // console.log("Video element loaded:", e.target.videoWidth, e.target.videoHeight);
-        }}
-      />
+      <video ref={videoRef} className="hidden" playsInline />
       <canvas
         ref={canvasRef}
         className="w-full max-w-4xl border border-gray-300 rounded-lg cursor-pointer"
         onClick={handleCanvasClick}
       />
+      {/* Отображаем статус */}
+      <div className="text-blue-600">{status}</div>
+      {/* Ошибки, если есть */}
       {error && <div className="text-red-500">{error}</div>}
+      {/* Кнопка запуска / остановки камеры */}
       {!capturedImage && (
         <button
           onClick={isStarted ? stopCamera : startCamera}
@@ -333,6 +280,12 @@ const WebCamera = () => {
             </>
           )}
         </button>
+      )}
+      {/* Показ сохранённого снимка (если есть) */}
+      {capturedImage && (
+        <div className="mt-4">
+          <img src={capturedImage} alt="Captured" className="max-w-full border border-gray-300 rounded-lg" />
+        </div>
       )}
     </div>
   );
