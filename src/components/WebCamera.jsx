@@ -8,14 +8,15 @@ const WebCamera = ({ onCapture }) => {
   const [isPaperDetected, setIsPaperDetected] = useState(false);
 
   useEffect(() => {
+    // Запуск камеры
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
+          video: { facingMode: "environment" }, // Задняя камера
         });
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          videoRef.current.play();
+          await videoRef.current.play();
           setIsReady(true);
         }
       } catch (error) {
@@ -25,6 +26,7 @@ const WebCamera = ({ onCapture }) => {
 
     startCamera();
 
+    // Остановка камеры при размонтировании
     return () => {
       if (videoRef.current && videoRef.current.srcObject) {
         const tracks = videoRef.current.srcObject.getTracks();
@@ -33,7 +35,7 @@ const WebCamera = ({ onCapture }) => {
     };
   }, []);
 
-  const drawFrame = () => {
+  const processFrame = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
@@ -43,18 +45,11 @@ const WebCamera = ({ onCapture }) => {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    // Рисуем текущий кадр из видео
+    // Рисуем текущий кадр
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    return ctx;
-  };
-
-  const processFrame = () => {
-    const ctx = drawFrame();
-    if (!ctx) return;
-
-    const frame = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
-
+    // Обрабатываем изображение с OpenCV
+    const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const src = cv.matFromImageData(frame);
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
@@ -83,14 +78,14 @@ const WebCamera = ({ onCapture }) => {
           points.push({ x, y });
         }
 
-        // Рисуем рамку бумаги
+        // Рисуем контуры бумаги
         ctx.beginPath();
         ctx.moveTo(points[0].x, points[0].y);
         for (let j = 1; j < points.length; j++) {
           ctx.lineTo(points[j].x, points[j].y);
         }
         ctx.closePath();
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 3;
         ctx.strokeStyle = "green";
         ctx.stroke();
 
@@ -100,6 +95,7 @@ const WebCamera = ({ onCapture }) => {
 
     setIsPaperDetected(paperDetected);
 
+    // Освобождаем ресурсы OpenCV
     src.delete();
     gray.delete();
     edges.delete();
@@ -108,17 +104,17 @@ const WebCamera = ({ onCapture }) => {
   };
 
   useEffect(() => {
-    let animationFrame;
+    let animationFrameId;
     const update = () => {
       processFrame();
-      animationFrame = requestAnimationFrame(update); // Постоянно обновляем кадры
+      animationFrameId = requestAnimationFrame(update); // Запускаем обработку следующего кадра
     };
 
     if (isReady) {
       update();
     }
 
-    return () => cancelAnimationFrame(animationFrame);
+    return () => cancelAnimationFrame(animationFrameId); // Останавливаем цикл при размонтировании
   }, [isReady]);
 
   const handleCapture = () => {
@@ -135,7 +131,14 @@ const WebCamera = ({ onCapture }) => {
 
   return (
     <div style={{ position: "relative", width: "100%", maxWidth: "400px" }}>
-      <video ref={videoRef} style={{ width: "100%", height: "auto", display: isReady ? "block" : "none" }} />
+      <video
+        ref={videoRef}
+        style={{
+          width: "100%",
+          height: "auto",
+          display: isReady ? "block" : "none",
+        }}
+      />
       <canvas
         ref={canvasRef}
         style={{
