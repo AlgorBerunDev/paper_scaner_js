@@ -8,12 +8,16 @@ const WebCamera = ({ onCapture }) => {
   const [isPaperDetected, setIsPaperDetected] = useState(false);
 
   useEffect(() => {
-    // Запуск камеры
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" }, // Задняя камера
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
         });
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
@@ -21,12 +25,12 @@ const WebCamera = ({ onCapture }) => {
         }
       } catch (error) {
         console.error("Ошибка доступа к камере:", error);
+        alert("Не удалось получить доступ к камере. Проверьте настройки.");
       }
     };
 
     startCamera();
 
-    // Остановка камеры при размонтировании
     return () => {
       if (videoRef.current && videoRef.current.srcObject) {
         const tracks = videoRef.current.srcObject.getTracks();
@@ -105,16 +109,17 @@ const WebCamera = ({ onCapture }) => {
 
   useEffect(() => {
     let animationFrameId;
+
     const update = () => {
       processFrame();
-      animationFrameId = requestAnimationFrame(update); // Запускаем обработку следующего кадра
+      animationFrameId = requestAnimationFrame(update); // Постоянно обновляем кадры
     };
 
     if (isReady) {
       update();
     }
 
-    return () => cancelAnimationFrame(animationFrameId); // Останавливаем цикл при размонтировании
+    return () => cancelAnimationFrame(animationFrameId);
   }, [isReady]);
 
   const handleCapture = () => {
