@@ -33,7 +33,7 @@ const WebCamera = ({ onCapture }) => {
     };
   }, []);
 
-  const processFrame = () => {
+  const drawFrame = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
@@ -43,8 +43,17 @@ const WebCamera = ({ onCapture }) => {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
+    // Рисуем текущий кадр из видео
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    return ctx;
+  };
+
+  const processFrame = () => {
+    const ctx = drawFrame();
+    if (!ctx) return;
+
+    const frame = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
 
     const src = cv.matFromImageData(frame);
     const gray = new cv.Mat();
@@ -74,6 +83,7 @@ const WebCamera = ({ onCapture }) => {
           points.push({ x, y });
         }
 
+        // Рисуем рамку бумаги
         ctx.beginPath();
         ctx.moveTo(points[0].x, points[0].y);
         for (let j = 1; j < points.length; j++) {
@@ -98,13 +108,17 @@ const WebCamera = ({ onCapture }) => {
   };
 
   useEffect(() => {
-    let interval;
+    let animationFrame;
+    const update = () => {
+      processFrame();
+      animationFrame = requestAnimationFrame(update); // Постоянно обновляем кадры
+    };
+
     if (isReady) {
-      interval = setInterval(() => {
-        processFrame();
-      }, 100); // Обрабатываем кадр каждые 100 мс
+      update();
     }
-    return () => clearInterval(interval);
+
+    return () => cancelAnimationFrame(animationFrame);
   }, [isReady]);
 
   const handleCapture = () => {
