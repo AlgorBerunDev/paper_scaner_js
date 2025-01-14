@@ -11,7 +11,7 @@ const WebCamera = ({ onCapture }) => {
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" }, // Задняя камера
+          video: { facingMode: "environment" },
         });
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -33,14 +33,11 @@ const WebCamera = ({ onCapture }) => {
     };
   }, []);
 
-  const handleAnalyze = () => {
+  const processFrame = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!video || !canvas) {
-      alert("Камера не готова.");
-      return;
-    }
+    if (!video || !canvas) return;
 
     const ctx = canvas.getContext("2d");
     canvas.width = video.videoWidth;
@@ -53,11 +50,9 @@ const WebCamera = ({ onCapture }) => {
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // Обнаружение краев
     const edges = new cv.Mat();
     cv.Canny(gray, edges, 50, 150);
 
-    // Обнаружение контуров
     const contours = new cv.MatVector();
     const hierarchy = new cv.Mat();
     cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -79,7 +74,6 @@ const WebCamera = ({ onCapture }) => {
           points.push({ x, y });
         }
 
-        // Рисуем контур
         ctx.beginPath();
         ctx.moveTo(points[0].x, points[0].y);
         for (let j = 1; j < points.length; j++) {
@@ -96,25 +90,28 @@ const WebCamera = ({ onCapture }) => {
 
     setIsPaperDetected(paperDetected);
 
-    // Освобождаем память
     src.delete();
     gray.delete();
     edges.delete();
     contours.delete();
     hierarchy.delete();
-
-    if (!paperDetected) {
-      alert("Бумага не обнаружена.");
-    }
   };
 
-  const handleCapture = () => {
-    if (!isPaperDetected) {
-      alert("Бумага не обнаружена! Убедитесь, что она в кадре.");
-      return;
+  useEffect(() => {
+    let interval;
+    if (isReady) {
+      interval = setInterval(() => {
+        processFrame();
+      }, 100); // Обрабатываем кадр каждые 100 мс
     }
+    return () => clearInterval(interval);
+  }, [isReady]);
 
+  const handleCapture = () => {
     const canvas = canvasRef.current;
+
+    if (!canvas) return;
+
     canvas.toBlob(blob => {
       if (blob) {
         onCapture(blob); // Отправляем изображение на сервер
@@ -138,20 +135,6 @@ const WebCamera = ({ onCapture }) => {
       {!isReady && <p>Загрузка камеры...</p>}
       <div style={{ marginTop: "10px", display: "flex", gap: "10px" }}>
         <button
-          onClick={handleAnalyze}
-          style={{
-            padding: "10px 20px",
-            fontSize: "16px",
-            backgroundColor: "#007BFF",
-            color: "#FFF",
-            border: "none",
-            borderRadius: "5px",
-            cursor: "pointer",
-          }}
-        >
-          Проверить
-        </button>
-        <button
           onClick={handleCapture}
           style={{
             padding: "10px 20px",
@@ -160,9 +143,8 @@ const WebCamera = ({ onCapture }) => {
             color: "#FFF",
             border: "none",
             borderRadius: "5px",
-            cursor: isPaperDetected ? "pointer" : "not-allowed",
+            cursor: "pointer",
           }}
-          disabled={!isPaperDetected}
         >
           Сфотографировать
         </button>
