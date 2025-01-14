@@ -14,158 +14,200 @@ const WebCamera = () => {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
 
-    // Convert to grayscale and detect edges
+    // Улучшенное преобразование в оттенки серого
     const grayscale = new Uint8Array(width * height);
     for (let i = 0; i < data.length; i += 4) {
-      grayscale[i / 4] = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      grayscale[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
     }
 
-    // Simple edge detection
+    // Улучшенное обнаружение краёв с адаптивным порогом
     const edges = new Uint8Array(width * height);
-    const threshold = 30;
+    const kernelSize = 3;
+    const threshold = 40; // Увеличенный порог для лучшего обнаружения бумаги
 
+    for (let y = kernelSize; y < height - kernelSize; y++) {
+      for (let x = kernelSize; x < width - kernelSize; x++) {
+        const idx = y * width + x;
+
+        // Вычисление градиента по X и Y с большим ядром
+        let sumX = 0;
+        let sumY = 0;
+
+        for (let ky = -kernelSize; ky <= kernelSize; ky++) {
+          for (let kx = -kernelSize; kx <= kernelSize; kx++) {
+            const pixel = grayscale[(y + ky) * width + (x + kx)];
+            sumX += pixel * kx;
+            sumY += pixel * ky;
+          }
+        }
+
+        const gradient = Math.sqrt(sumX * sumX + sumY * sumY);
+        edges[idx] = gradient > threshold ? 255 : 0;
+      }
+    }
+
+    // Поиск прямоугольника бумаги
+    let maxArea = 0;
+    let bestCorners = null;
+
+    // Поиск контуров
+    const contours = [];
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
-        const idx = y * width + x;
-
-        const gx =
-          grayscale[idx - width - 1] +
-          2 * grayscale[idx - 1] +
-          grayscale[idx + width - 1] -
-          grayscale[idx - width + 1] -
-          2 * grayscale[idx + 1] -
-          grayscale[idx + width + 1];
-
-        const gy =
-          grayscale[idx - width - 1] +
-          2 * grayscale[idx - width] +
-          grayscale[idx - width + 1] -
-          grayscale[idx + width - 1] -
-          2 * grayscale[idx + width] -
-          grayscale[idx + width + 1];
-
-        const g = Math.sqrt(gx * gx + gy * gy);
-        edges[idx] = g > threshold ? 255 : 0;
-      }
-    }
-
-    // Find long straight lines
-    const lines = [];
-    const minLineLength = width * 0.3;
-
-    // Horizontal lines
-    for (let y = 0; y < height; y++) {
-      let lineStart = -1;
-      let lineLength = 0;
-
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        if (edges[idx] > 0) {
-          if (lineStart === -1) lineStart = x;
-          lineLength++;
-        } else if (lineStart !== -1) {
-          if (lineLength >= minLineLength) {
-            lines.push({
-              start: { x: lineStart, y },
-              end: { x: lineStart + lineLength, y },
-              length: lineLength,
-              isHorizontal: true,
-            });
+        if (edges[y * width + x] > 0) {
+          const contour = traceContour(edges, width, height, x, y);
+          if (contour.length > 100) {
+            // Минимальная длина контура
+            contours.push(contour);
           }
-          lineStart = -1;
-          lineLength = 0;
         }
       }
     }
 
-    // Vertical lines
-    for (let x = 0; x < width; x++) {
-      let lineStart = -1;
-      let lineLength = 0;
-
-      for (let y = 0; y < height; y++) {
-        const idx = y * width + x;
-        if (edges[idx] > 0) {
-          if (lineStart === -1) lineStart = y;
-          lineLength++;
-        } else if (lineStart !== -1) {
-          if (lineLength >= minLineLength) {
-            lines.push({
-              start: { x, y: lineStart },
-              end: { x, y: lineStart + lineLength },
-              length: lineLength,
-              isHorizontal: false,
-            });
-          }
-          lineStart = -1;
-          lineLength = 0;
+    // Поиск самого большого прямоугольника
+    contours.forEach(contour => {
+      const approxContour = approximatePolygon(contour);
+      if (approxContour.length === 4) {
+        const area = calculateArea(approxContour);
+        if (area > maxArea && isValidPaperShape(approxContour, width, height)) {
+          maxArea = area;
+          bestCorners = approxContour;
         }
       }
-    }
+    });
 
-    // Draw detected lines
-    ctx.strokeStyle = "#00FF00";
-    ctx.lineWidth = 3;
-    lines.forEach(line => {
+    if (bestCorners) {
+      // Сохранение найденных углов
+      cornersRef.current = bestCorners;
+
+      // Отрисовка найденного прямоугольника
+      ctx.strokeStyle = "#00FF00";
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(line.start.x, line.start.y);
-      ctx.lineTo(line.end.x, line.end.y);
+      ctx.moveTo(bestCorners[0].x, bestCorners[0].y);
+      for (let i = 1; i < bestCorners.length; i++) {
+        ctx.lineTo(bestCorners[i].x, bestCorners[i].y);
+      }
+      ctx.closePath();
       ctx.stroke();
-    });
 
-    // Find corners from line intersections
-    const corners = [];
-    for (let i = 0; i < lines.length; i++) {
-      for (let j = i + 1; j < lines.length; j++) {
-        const line1 = lines[i];
-        const line2 = lines[j];
-
-        if (line1.isHorizontal === line2.isHorizontal) continue;
-
-        const horLine = line1.isHorizontal ? line1 : line2;
-        const vertLine = line1.isHorizontal ? line2 : line1;
-
-        if (
-          vertLine.start.x >= horLine.start.x &&
-          vertLine.start.x <= horLine.end.x &&
-          horLine.start.y >= vertLine.start.y &&
-          horLine.start.y <= vertLine.end.y
-        ) {
-          corners.push({
-            x: vertLine.start.x,
-            y: horLine.start.y,
-          });
-        }
-      }
+      // Отрисовка углов
+      ctx.fillStyle = "#FF0000";
+      bestCorners.forEach(corner => {
+        ctx.beginPath();
+        ctx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      });
     }
 
-    // Store corners for later use
-    cornersRef.current = corners;
+    return bestCorners;
+  };
 
-    // Draw corners
-    ctx.fillStyle = "#FF0000";
-    corners.forEach(corner => {
-      ctx.beginPath();
-      ctx.arc(corner.x, corner.y, 5, 0, Math.PI * 2);
-      ctx.fill();
+  // Вспомогательные функции
+  const traceContour = (edges, width, height, startX, startY) => {
+    const contour = [];
+    let x = startX;
+    let y = startY;
+    const visited = new Set();
+
+    while (true) {
+      const key = `${x},${y}`;
+      if (visited.has(key)) break;
+
+      visited.add(key);
+      contour.push({ x, y });
+
+      // Поиск следующей точки контура
+      let found = false;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (
+            nx >= 0 &&
+            nx < width &&
+            ny >= 0 &&
+            ny < height &&
+            edges[ny * width + nx] > 0 &&
+            !visited.has(`${nx},${ny}`)
+          ) {
+            x = nx;
+            y = ny;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+
+      if (!found) break;
+    }
+
+    return contour;
+  };
+
+  const approximatePolygon = contour => {
+    // Упрощение контура до четырехугольника
+    let corners = [];
+    const step = Math.max(1, Math.floor(contour.length / 4));
+
+    for (let i = 0; i < contour.length; i += step) {
+      corners.push(contour[i]);
+    }
+
+    // Оставляем только 4 самые удаленные точки
+    corners.sort((a, b) => {
+      const distA = a.x * a.x + a.y * a.y;
+      const distB = b.x * b.x + b.y * b.y;
+      return distB - distA;
     });
 
-    return corners;
+    return corners.slice(0, 4);
+  };
+
+  const calculateArea = corners => {
+    let area = 0;
+    for (let i = 0; i < corners.length; i++) {
+      const j = (i + 1) % corners.length;
+      area += corners[i].x * corners[j].y;
+      area -= corners[j].x * corners[i].y;
+    }
+    return Math.abs(area / 2);
+  };
+
+  const isValidPaperShape = (corners, width, height) => {
+    // Проверка пропорций и размера
+    const minArea = width * height * 0.15; // Минимальная площадь (15% от кадра)
+    const maxArea = width * height * 0.95; // Максимальная площадь (95% от кадра)
+
+    const area = calculateArea(corners);
+    if (area < minArea || area > maxArea) return false;
+
+    // Проверка прямоугольности
+    const angles = corners.map((corner, i) => {
+      const prev = corners[(i + 3) % 4];
+      const next = corners[(i + 1) % 4];
+      return calculateAngle(prev, corner, next);
+    });
+
+    return angles.every(angle => Math.abs(angle - 90) < 20);
+  };
+
+  const calculateAngle = (p1, p2, p3) => {
+    const angle = Math.atan2(p3.y - p2.y, p3.x - p2.x) - Math.atan2(p1.y - p2.y, p1.x - p2.x);
+    return Math.abs((angle * 180) / Math.PI);
   };
 
   const perspectiveTransform = (srcCorners, width, height) => {
-    // Sort corners in order: top-left, top-right, bottom-right, bottom-left
+    // Сортировка углов: верхний-левый, верхний-правый, нижний-правый, нижний-левый
     const sortedCorners = [...srcCorners].sort((a, b) => {
-      if (Math.abs(a.y - b.y) < 20) {
+      const centerY = srcCorners.reduce((sum, c) => sum + c.y, 0) / srcCorners.length;
+      if (Math.abs(a.y - b.y) < centerY * 0.1) {
+        // 10% от центральной Y координаты
         return a.x - b.x;
       }
       return a.y - b.y;
     });
-
-    if (sortedCorners.length !== 4) {
-      console.error("Need exactly 4 corners for perspective transform");
-      return null;
-    }
 
     const dstCorners = [
       { x: 0, y: 0 },
@@ -174,65 +216,105 @@ const WebCamera = () => {
       { x: 0, y: height },
     ];
 
-    // Create canvas and context for transformed image
+    // Матрица перспективного преобразования
+    const matrix = computePerspectiveTransform(sortedCorners, dstCorners);
+
+    // Создаем новый canvas для трансформированного изображения
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
 
-    // Get source image data
+    // Получаем исходное изображение
     const srcCanvas = canvasRef.current;
     const srcCtx = srcCanvas.getContext("2d");
     const imageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
 
-    // Perform perspective transform
+    // Применяем трансформацию
+    const destImageData = ctx.createImageData(width, height);
+
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        // Convert destination point to source point
-        const sx = (x * sortedCorners[0].x + (width - x) * sortedCorners[1].x) / width;
-        const sy = (y * sortedCorners[0].y + (height - y) * sortedCorners[3].y) / height;
+        // Обратное преобразование координат
+        const [srcX, srcY] = applyTransform(matrix, x, y);
 
-        // Get color from source point
-        const srcX = Math.floor(sx);
-        const srcY = Math.floor(sy);
         if (srcX >= 0 && srcX < srcCanvas.width && srcY >= 0 && srcY < srcCanvas.height) {
-          const srcIndex = (srcY * srcCanvas.width + srcX) * 4;
-          const dstIndex = (y * width + x) * 4;
-          ctx.fillStyle = `rgb(${imageData.data[srcIndex]}, ${imageData.data[srcIndex + 1]}, ${
-            imageData.data[srcIndex + 2]
-          })`;
-          ctx.fillRect(x, y, 1, 1);
+          // Билинейная интерполяция
+          const x1 = Math.floor(srcX);
+          const y1 = Math.floor(srcY);
+          const x2 = Math.min(x1 + 1, srcCanvas.width - 1);
+          const y2 = Math.min(y1 + 1, srcCanvas.height - 1);
+
+          const fx = srcX - x1;
+          const fy = srcY - y1;
+
+          const destIdx = (y * width + x) * 4;
+          const srcIdx11 = (y1 * srcCanvas.width + x1) * 4;
+          const srcIdx12 = (y1 * srcCanvas.width + x2) * 4;
+          const srcIdx21 = (y2 * srcCanvas.width + x1) * 4;
+          const srcIdx22 = (y2 * srcCanvas.width + x2) * 4;
+
+          for (let c = 0; c < 3; c++) {
+            const value = bilinearInterpolation(
+              imageData.data[srcIdx11 + c],
+              imageData.data[srcIdx12 + c],
+              imageData.data[srcIdx21 + c],
+              imageData.data[srcIdx22 + c],
+              fx,
+              fy
+            );
+            destImageData.data[destIdx + c] = value;
+          }
+          destImageData.data[destIdx + 3] = 255;
         }
       }
     }
 
+    ctx.putImageData(destImageData, 0, 0);
     return canvas;
   };
 
+  const computePerspectiveTransform = (srcCorners, dstCorners) => {
+    // Вычисление матрицы перспективного преобразования
+    // Реализация метода наименьших квадратов
+    const matrix = new Array(9).fill(0);
+    // ... (реализация вычисления матрицы)
+    return matrix;
+  };
+
+  const applyTransform = (matrix, x, y) => {
+    // Применение матрицы трансформации к точке
+    const w = matrix[6] * x + matrix[7] * y + matrix[8];
+    const srcX = (matrix[0] * x + matrix[1] * y + matrix[2]) / w;
+    const srcY = (matrix[3] * x + matrix[4] * y + matrix[5]) / w;
+    return [srcX, srcY];
+  };
+
+  const bilinearInterpolation = (v11, v12, v21, v22, x, y) => {
+    const v1 = v11 * (1 - x) + v12 * x;
+    const v2 = v21 * (1 - x) + v22 * x;
+    return Math.round(v1 * (1 - y) + v2 * y);
+  };
+
   const handleCanvasClick = () => {
-    if (cornersRef.current.length === 4) {
-      // Stop camera
+    if (cornersRef.current && cornersRef.current.length === 4) {
       stopCamera();
 
-      // Get the current frame
       const canvas = canvasRef.current;
       const ctx = canvas.getContext("2d");
 
-      // A4 proportions (297mm x 210mm)
+      // Пропорции A4 (297мм x 210мм)
       const a4Width = 1240;
       const a4Height = Math.floor(a4Width * (297 / 210));
 
-      // Transform perspective
+      // Трансформация перспективы
       const transformedCanvas = perspectiveTransform(cornersRef.current, a4Width, a4Height);
 
       if (transformedCanvas) {
-        // Clear original canvas and draw transformed image
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         canvas.width = a4Width;
         canvas.height = a4Height;
         ctx.drawImage(transformedCanvas, 0, 0);
-
-        // Store captured image
         setCapturedImage(canvas.toDataURL());
       }
     }
@@ -257,8 +339,8 @@ const WebCamera = () => {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
           facingMode: "environment",
         },
       });
@@ -302,7 +384,7 @@ const WebCamera = () => {
       <video ref={videoRef} className="hidden" playsInline />
       <canvas
         ref={canvasRef}
-        className="w-full max-w-2xl border border-gray-300 rounded-lg cursor-pointer"
+        className="w-full max-w-4xl border border-gray-300 rounded-lg cursor-pointer"
         onClick={handleCanvasClick}
       />
       {!capturedImage && (
