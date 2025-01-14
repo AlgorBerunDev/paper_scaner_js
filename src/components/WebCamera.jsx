@@ -13,7 +13,7 @@ const WebCamera = () => {
 
   const findPaper = (ctx, width, height) => {
     try {
-      console.log("Finding paper. Canvas dimensions:", width, height);
+      // console.log("Finding paper. Canvas dimensions:", width, height);
       const imageData = ctx.getImageData(0, 0, width, height);
       const data = imageData.data;
 
@@ -167,7 +167,7 @@ const WebCamera = () => {
       cornersRef.current = bestCorners;
       return bestCorners;
     } catch (err) {
-      console.error("Error in findPaper:", err);
+      // console.error("Error in findPaper:", err);
       setError("Error processing image");
       return null;
     }
@@ -215,11 +215,11 @@ const WebCamera = () => {
       const canvas = canvasRef.current;
 
       if (!video || !canvas) {
-        console.log("Video or canvas not ready");
+        // console.log("Video or canvas not ready");
         return;
       }
 
-      console.log("Drawing to canvas. Video dimensions:", video.videoWidth, video.videoHeight);
+      // console.log("Drawing to canvas. Video dimensions:", video.videoWidth, video.videoHeight);
 
       // Установка размеров canvas
       canvas.width = video.videoWidth || 640;
@@ -231,7 +231,7 @@ const WebCamera = () => {
 
       requestId.current = requestAnimationFrame(drawToCanvas);
     } catch (err) {
-      console.error("Error in drawToCanvas:", err);
+      // console.error("Error in drawToCanvas:", err);
       setError("Error drawing to canvas");
     }
   };
@@ -251,7 +251,7 @@ const WebCamera = () => {
       if (videoElement) {
         videoElement.srcObject = mediaStream;
         videoElement.onloadedmetadata = () => {
-          console.log("Video metadata loaded. Dimensions:", videoElement.videoWidth, videoElement.videoHeight);
+          // console.log("Video metadata loaded. Dimensions:", videoElement.videoWidth, videoElement.videoHeight);
           videoElement.play();
           drawToCanvas();
         };
@@ -261,7 +261,7 @@ const WebCamera = () => {
       setIsStarted(true);
       setCapturedImage(null);
     } catch (err) {
-      console.error("Error accessing camera:", err);
+      // console.error("Error accessing camera:", err);
       setError("Could not access camera");
     }
   };
@@ -305,7 +305,7 @@ const WebCamera = () => {
         className="hidden"
         playsInline
         onLoadedMetadata={e => {
-          console.log("Video element loaded:", e.target.videoWidth, e.target.videoHeight);
+          // console.log("Video element loaded:", e.target.videoWidth, e.target.videoHeight);
         }}
       />
       <canvas
